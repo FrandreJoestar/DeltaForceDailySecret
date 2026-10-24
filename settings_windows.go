@@ -231,7 +231,7 @@ func setAutostart(enable bool) error {
 
 // isProcessRunning 通过进程快照判断指定进程名是否在运行
 func isProcessRunning(name string) bool {
-	name = strings.TrimSpace(name)
+	name = normalizeProcessName(name)
 	if name == "" {
 		return false
 	}

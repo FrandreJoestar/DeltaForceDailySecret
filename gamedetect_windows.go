@@ -49,10 +49,31 @@ func followTargets() []string {
 			return targets
 		}
 	}
-	if exe := strings.TrimSpace(cfg.FollowExe); exe != "" {
+	if exe := normalizeProcessName(cfg.FollowExe); exe != "" {
 		return []string{exe}
 	}
 	return nil
+}
+
+// normalizeProcessName 把用户输入的进程名规范化为可比较的文件名，
+// 兼容带引号、带完整路径、省略 .exe 等写法（名称本身允许包含空格）
+func normalizeProcessName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.Trim(name, `"'`)
+	if name == "" {
+		return ""
+	}
+	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if !strings.EqualFold(filepath.Ext(name), ".exe") {
+		name += ".exe"
+	}
+	return name
 }
 
 func anyProcessRunning(targets []string) bool {
@@ -374,7 +395,9 @@ func searchGameClientExe(root string) string {
 		if strings.Contains(name, "launcher") || strings.Contains(name, "unins") || strings.Contains(name, "setup") {
 			return nil
 		}
-		if strings.Contains(name, "shipping") || (strings.Contains(name, "deltaforce") && strings.Contains(name, "client")) {
+		// 文件名可能包含空格或分隔符，比较前压缩掉
+		compact := strings.NewReplacer(" ", "", "_", "", "-", "").Replace(name)
+		if strings.Contains(name, "shipping") || (strings.Contains(compact, "deltaforce") && strings.Contains(compact, "client")) {
 			found = path
 			return filepath.SkipAll
 		}

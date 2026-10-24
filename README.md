@@ -46,7 +46,7 @@
 | 开机自启 | 写入 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 | 显示/隐藏悬浮窗快捷键 | 点击「更改」后按下新的组合键，需包含 Ctrl / Alt / Shift，Esc 取消 |
 | 自动识别三角洲行动主程序 | 通过注册表自动识别并跟随游戏进程（推荐） |
-| 手动进程名 | 自动识别失败时使用的进程名，默认为 `DeltaForceClient-Win64-Shipping.exe` |
+| 手动进程名 | 自动识别失败时使用的进程名，默认为 `DeltaForceClient-Win64-Shipping.exe`；名称含空格也可以，支持粘贴完整路径或省略 `.exe` |
 | 悬浮窗背景不透明度 | 20-100，仅影响背景，文字不受影响 |
 
 设置保存在程序目录的 `settings.json`。未手动指定进程名时，默认跟随 `DeltaForceClient-Win64-Shipping.exe` 的启动与退出。
