@@ -1,0 +1,12 @@
+# 构建产物
+*.exe
+*.dll
+*.pdb
+
+# 本地运行数据（含 access_token / 个人配置，请勿提交）
+credentials.json
+settings.json
+qr.png
+
+# 调试产物
+*.dmp
