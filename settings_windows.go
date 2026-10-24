@@ -31,6 +31,9 @@ const (
 	minOpacity     = 20
 	maxOpacity     = 100
 
+	// 默认跟随的游戏主程序进程名
+	defaultFollowExe = "DeltaForceClient-Win64-Shipping.exe"
+
 	runKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
 	runValueName = "DeltaForceDailySecret"
 
@@ -49,7 +52,7 @@ type appSettings struct {
 var (
 	appSettingsMu   sync.Mutex
 	appSettingsPath string
-	appCfg          = appSettings{HotkeyMod: defaultHotkeyMod, HotkeyVK: defaultHotkeyVK, Opacity: defaultOpacity, AutoFollow: true}
+	appCfg          = appSettings{HotkeyMod: defaultHotkeyMod, HotkeyVK: defaultHotkeyVK, FollowExe: defaultFollowExe, Opacity: defaultOpacity, AutoFollow: true}
 )
 
 var (
@@ -107,6 +110,10 @@ func loadAppSettings() {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return
 	}
+	// 旧版配置没有 follow_exe 字段或留空时，使用默认的跟随进程名
+	if strings.TrimSpace(raw.FollowExe) == "" {
+		raw.FollowExe = defaultFollowExe
+	}
 	s := appSettings{
 		HotkeyMod:  raw.HotkeyMod,
 		HotkeyVK:   raw.HotkeyVK,
@@ -129,6 +136,9 @@ func loadAppSettings() {
 
 func saveAppSettings(s appSettings) error {
 	s.Opacity = clampOpacity(s.Opacity)
+	if strings.TrimSpace(s.FollowExe) == "" {
+		s.FollowExe = defaultFollowExe
+	}
 	appSettingsMu.Lock()
 	appCfg = s
 	appSettingsMu.Unlock()

@@ -421,7 +421,7 @@ func createSettingsControls(hwnd uintptr) {
 	setControlText(edit, cfg.FollowExe)
 	y += px(32)
 
-	hint := createControl(hwnd, "STATIC", "自动识别失败时可手动填写进程名，例如：\r\nDeltaForceClient-Win64-Shipping.exe（留空表示不跟随）", 0, pad, y, width, px(34), 0)
+	hint := createControl(hwnd, "STATIC", "自动识别失败时使用此进程名，默认：\r\nDeltaForceClient-Win64-Shipping.exe", 0, pad, y, width, px(34), 0)
 	pSendMessageW.Call(hint, wmSetFont, fontSmall, 1)
 	y += px(44)
 
