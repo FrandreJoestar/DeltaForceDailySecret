@@ -436,6 +436,14 @@ func createSettingsControls(hwnd uintptr) {
 	createControl(hwnd, "BUTTON", "取消", bsPushButton|wsTabStop, pad+width-px(80), y, px(80), px(30), idCancel)
 
 	statusLabelHwnd = createControl(hwnd, "STATIC", "", 0, pad, y+px(42), width, px(20), ctrlStatus)
+
+	// 后台计算跟随状态，避免自动识别扫描磁盘时阻塞界面
+	go func() {
+		text := followSummary()
+		if hwnd := statusLabelHwnd; hwnd != 0 {
+			pSendMessageW.Call(hwnd, wmSetText, 0, utf16Ptr(text))
+		}
+	}()
 }
 
 func createControl(parent uintptr, class, text string, style uintptr, x, y, w, h int32, id uintptr) uintptr {

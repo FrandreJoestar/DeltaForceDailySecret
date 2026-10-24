@@ -60,6 +60,7 @@ func openConsole() {
 	bindConsole()
 	pSetConsoleTitleW.Call(utf16Ptr("三角洲行动 · 每日密码"))
 	fmt.Println("控制台已打开，可查看运行日志。")
+	logFollowDiagnostics()
 }
 
 // bindConsole 把标准输入输出重新绑定到当前控制台

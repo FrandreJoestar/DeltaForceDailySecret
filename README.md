@@ -130,6 +130,20 @@ gamedetect_windows.go  // 通过注册表识别三角洲行动主程序
 console_windows.go     // 无窗口启动与按需打开控制台
 ```
 
+## 常见问题
+
+**拷贝 exe 到另一台电脑后看不到悬浮窗？**
+
+1. 悬浮窗默认只在游戏主程序运行时显示。游戏没启动时看不到是正常现象，可用托盘左键或快捷键临时显示。
+2. 不同发行渠道（WeGame / Steam）的主程序名可能不同，程序内置了三个候选名：`DeltaForceClient-Win64-Shipping.exe`、`DeltaForceClient.exe`、`Delta Force Client-Win64-Shipping.exe`，任一在运行就会显示。若都匹配不上，在设置里手动填写进程名（支持粘贴完整路径、带空格、省略 `.exe`）。
+3. 游戏使用「全屏独占」时，任何置顶窗口都会被游戏画面覆盖，建议切换到「无边框窗口 / 窗口化」模式。
+4. 排查：托盘右键 → 打开控制台，会打印自动识别结果、当前跟随目标，以及每个候选进程是否在运行。
+5. 设置窗口底部也会显示「跟随 N 个候选进程，游戏运行中/未运行」。
+
+**只需要发送 exe 吗？**
+
+是的，`settings.json` 和 `credentials.json` 会在首次运行时自动生成。不要把自己带 access_token 的 `credentials.json` 发给别人。
+
 ## 说明与注意
 
 - 登录凭据 `credentials.json` 与本地配置 `settings.json` 均在程序目录生成，其中包含 access_token，请勿提交到公开仓库（仓库已通过 `.gitignore` 排除）。

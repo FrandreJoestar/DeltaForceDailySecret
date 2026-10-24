@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -41,7 +42,15 @@ type gameInstall struct {
 	score       int
 }
 
-// followTargets 返回需要跟随的进程名；优先使用自动识别结果，其次用手动配置
+// builtinFollowTargets 是内置的游戏主程序候选名，任一在运行就显示悬浮窗；
+// 不同发行渠道（WeGame / Steam）的主程序名可能不同
+var builtinFollowTargets = []string{
+	"DeltaForceClient-Win64-Shipping.exe",
+	"DeltaForceClient.exe",
+	"Delta Force Client-Win64-Shipping.exe",
+}
+
+// followTargets 返回需要跟随的进程名；优先使用自动识别结果，其次用内置候选与手动配置
 func followTargets() []string {
 	cfg := currentSettings()
 	if cfg.AutoFollow {
@@ -49,10 +58,21 @@ func followTargets() []string {
 			return targets
 		}
 	}
+
+	targets := append([]string(nil), builtinFollowTargets...)
 	if exe := normalizeProcessName(cfg.FollowExe); exe != "" {
-		return []string{exe}
+		found := false
+		for _, t := range targets {
+			if strings.EqualFold(t, exe) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			targets = append([]string{exe}, targets...)
+		}
 	}
-	return nil
+	return targets
 }
 
 // normalizeProcessName 把用户输入的进程名规范化为可比较的文件名，
@@ -83,6 +103,31 @@ func anyProcessRunning(targets []string) bool {
 		}
 	}
 	return false
+}
+
+// followSummary 返回一行跟随状态描述，用于设置窗口提示
+func followSummary() string {
+	targets := followTargets()
+	state := "未运行"
+	if anyProcessRunning(targets) {
+		state = "运行中"
+	}
+	auto := "开启"
+	if !currentSettings().AutoFollow {
+		auto = "关闭"
+	}
+	return fmt.Sprintf("跟随 %d 个候选进程，游戏%s（自动识别：%s）", len(targets), state, auto)
+}
+
+// logFollowDiagnostics 输出完整的跟随配置，便于排查识别问题
+func logFollowDiagnostics() {
+	cfg := currentSettings()
+	targets := followTargets()
+	log.Printf("自动识别：%v；手动进程名：%q", cfg.AutoFollow, cfg.FollowExe)
+	log.Printf("跟随目标：%s", strings.Join(targets, " / "))
+	for _, t := range targets {
+		log.Printf("  %s -> %v", t, isProcessRunning(t))
+	}
 }
 
 // detectGameTargets 通过注册表定位三角洲行动主程序，结果带缓存
