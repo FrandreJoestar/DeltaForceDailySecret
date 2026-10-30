@@ -138,6 +138,23 @@ go build -ldflags "-H windowsgui" -o deltaforce-secret.exe .
 go build -o deltaforce-secret-debug.exe .
 ```
 
+推荐用构建脚本编译，它会在链接前写入 Windows 版本资源（公司、产品名、文件版本），exe 属性里不再是空白信息：
+
+```powershell
+# 默认版本 1.0.0.0
+powershell -ExecutionPolicy Bypass -File .\build.ps1
+
+# 指定版本号
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Version 1.2.0.0
+
+# 调试版（保留控制台）
+powershell -ExecutionPolicy Bypass -File .\build.ps1 -Console
+```
+
+脚本通过 `go run github.com/josephspurrier/goversioninfo` 生成 `resource_windows_amd64.syso` 再编译，首次运行需要联网下载该工具；下载失败时会给出警告并继续编译（只是不带版本信息）。
+
+> 写入版本资源只影响“文件属性”里显示的发布者名称与版本号，**不会**消除 SmartScreen 的“未知发布者”提示——那需要商业代码签名证书，自签名证书对 SmartScreen 无效。
+
 交叉编译（在非 Windows 机器上构建 Windows 版本）：
 
 ```bash
@@ -282,6 +299,8 @@ Unblock-File .\deltaforce-secret.exe
 | `advapi32.dll` | 注册表读写（开机自启、识别游戏安装信息）                       |
 | `kernel32.dll` | 进程快照、控制台附加、模块句柄、单实例互斥体                     |
 
+**仅构建期使用**：`github.com/josephspurrier/goversioninfo`（由 `build.ps1` 通过 `go run` 调用，只用于生成版本资源 `.syso`，不会进入 `go.mod`，也不是运行期依赖）。
+
 ## 项目结构
 
 ```
@@ -295,5 +314,7 @@ gamedetect_windows.go     // 通过注册表识别三角洲行动主程序
 console_windows.go        // 无窗口启动与按需打开控制台
 logging_windows.go        // 日志：内存环形缓冲 + 按天滚动的文件日志 + 控制台回放
 singleinstance_windows.go // 单实例互斥体，重复启动时唤醒已有悬浮窗
+build.ps1                 // 构建脚本：生成版本资源后编译
+versioninfo.json          // 版本资源模板（公司、产品名、版本号）
 ```
 
