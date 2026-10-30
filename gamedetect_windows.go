@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,12 +98,82 @@ func normalizeProcessName(name string) string {
 }
 
 func anyProcessRunning(targets []string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	// 只建一次快照，避免每个候选进程各枚举一遍系统进程
+	set := processNameSet()
 	for _, t := range targets {
-		if isProcessRunning(t) {
+		exe := normalizeProcessName(t)
+		if exe == "" {
+			continue
+		}
+		if _, ok := set[strings.ToLower(exe)]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+// looksLikeGameProcess 判断进程名是否像《三角洲行动》的主程序。
+//
+// 不同发行渠道（WeGame / Steam / Epic）的主程序名不一样，客户端升级也可能改名，
+// 死名单总有漏网的一天；这里用命名特征兜底，并排除启动器、崩溃上报、反作弊等附属进程。
+func looksLikeGameProcess(name string) bool {
+	n := strings.ToLower(name)
+	if !strings.HasSuffix(n, ".exe") {
+		return false
+	}
+	for _, bad := range []string{
+		"launcher", "unins", "setup", "crash", "helper", "report",
+		"anticheat", "secret", // secret 用于排除本程序自己
+	} {
+		if strings.Contains(n, bad) {
+			return false
+		}
+	}
+	compact := strings.NewReplacer(" ", "", "_", "", "-", "").Replace(n)
+	if strings.Contains(compact, "deltaforce") {
+		return true
+	}
+	return strings.Contains(compact, "delta") && strings.Contains(compact, "force")
+}
+
+// runningGameProcesses 返回当前正在运行、且名字像是游戏主程序的进程
+func runningGameProcesses() []string {
+	self := ""
+	if exe, err := os.Executable(); err == nil {
+		self = strings.ToLower(filepath.Base(exe))
+	}
+
+	var found []string
+	for lower, original := range processNameSet() {
+		if lower == self {
+			continue
+		}
+		if looksLikeGameProcess(lower) {
+			found = append(found, original)
+		}
+	}
+	sort.Strings(found)
+	return found
+}
+
+// mergeTargets 合并两组进程名并去重（大小写不敏感），保持先出现的顺序
+func mergeTargets(groups ...[]string) []string {
+	seen := make(map[string]bool, 8)
+	var out []string
+	for _, group := range groups {
+		for _, name := range group {
+			key := strings.ToLower(name)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // followSummary 返回一行跟随状态描述，用于设置窗口提示
@@ -144,7 +215,8 @@ func detectGameTargets() []string {
 	}
 
 	installs := findGameInstalls()
-	targets := resolveMainExecutables(installs)
+	// 注册表识别 + 运行中进程名兜底：后者能救回"安装信息缺失或客户端改过名"的情况
+	targets := mergeTargets(resolveMainExecutables(installs), runningGameProcesses())
 
 	changed := len(targets) != len(gameTargets)
 	if !changed {
@@ -162,7 +234,7 @@ func detectGameTargets() []string {
 		if len(targets) > 0 {
 			log.Printf("自动识别到游戏进程: %s", strings.Join(targets, ", "))
 		} else {
-			log.Printf("未能从注册表识别到三角洲行动主程序")
+			log.Printf("未能识别到三角洲行动主程序（注册表和运行进程都不匹配），可在设置里手动填写进程名")
 		}
 	}
 	return append([]string(nil), targets...)

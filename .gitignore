@@ -1,5 +1,6 @@
 # 构建产物
 *.exe
+*.exe~
 *.dll
 *.pdb
 
@@ -8,5 +9,10 @@ credentials.json
 settings.json
 qr.png
 
+# 原子写入留下的临时文件
+*.tmp
+
 # 调试产物
 *.dmp
+*.log
+logs/

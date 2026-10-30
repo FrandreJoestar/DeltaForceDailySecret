@@ -22,6 +22,11 @@ const (
 	trayIconID = 1
 	hotkeyID   = 1
 
+	// 托盘图标添加失败后的重试（开机时任务栏可能还没就绪）
+	trayRetryTimerID  = 2
+	trayRetryInterval = 2000
+	trayMaxRetries    = 30
+
 	wmCreate      = 0x0001
 	wmSetText     = 0x000C
 	wmCommand     = 0x0111
@@ -113,26 +118,29 @@ var (
 
 	pShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 
-	pLoadIconW              = user32.NewProc("LoadIconW")
-	pCreatePopupMenu        = user32.NewProc("CreatePopupMenu")
-	pAppendMenuW            = user32.NewProc("AppendMenuW")
-	pTrackPopupMenu         = user32.NewProc("TrackPopupMenu")
-	pDestroyMenu            = user32.NewProc("DestroyMenu")
-	pGetCursorPos           = user32.NewProc("GetCursorPos")
-	pSetForegroundWindow    = user32.NewProc("SetForegroundWindow")
-	pIsWindowVisible        = user32.NewProc("IsWindowVisible")
-	pIsDialogMessageW       = user32.NewProc("IsDialogMessageW")
-	pGetDlgItem             = user32.NewProc("GetDlgItem")
-	pGetWindowTextW         = user32.NewProc("GetWindowTextW")
-	pRegisterWindowMessageW = user32.NewProc("RegisterWindowMessageW")
-	pRegisterHotKey         = user32.NewProc("RegisterHotKey")
-	pUnregisterHotKey       = user32.NewProc("UnregisterHotKey")
-	pSetFocus               = user32.NewProc("SetFocus")
-	pGetKeyState            = user32.NewProc("GetKeyState")
-	pMapVirtualKeyW         = user32.NewProc("MapVirtualKeyW")
+	pLoadIconW                   = user32.NewProc("LoadIconW")
+	pCreatePopupMenu             = user32.NewProc("CreatePopupMenu")
+	pAppendMenuW                 = user32.NewProc("AppendMenuW")
+	pTrackPopupMenu              = user32.NewProc("TrackPopupMenu")
+	pDestroyMenu                 = user32.NewProc("DestroyMenu")
+	pGetCursorPos                = user32.NewProc("GetCursorPos")
+	pSetForegroundWindow         = user32.NewProc("SetForegroundWindow")
+	pIsWindowVisible             = user32.NewProc("IsWindowVisible")
+	pIsDialogMessageW            = user32.NewProc("IsDialogMessageW")
+	pGetDlgItem                  = user32.NewProc("GetDlgItem")
+	pGetWindowTextW              = user32.NewProc("GetWindowTextW")
+	pRegisterWindowMessageW      = user32.NewProc("RegisterWindowMessageW")
+	pRegisterHotKey              = user32.NewProc("RegisterHotKey")
+	pUnregisterHotKey            = user32.NewProc("UnregisterHotKey")
+	pSetFocus                    = user32.NewProc("SetFocus")
+	pGetKeyState                 = user32.NewProc("GetKeyState")
+	pMapVirtualKeyW              = user32.NewProc("MapVirtualKeyW")
+	pChangeWindowMessageFilterEx = user32.NewProc("ChangeWindowMessageFilterEx")
 
 	trayHwnd          uintptr
 	trayIconAdded     bool
+	trayRetries       int
+	trayBroken        bool
 	taskbarCreatedMsg uint32
 
 	settingsHwnd            uintptr
@@ -151,7 +159,12 @@ var (
 	statusLabelHwnd  uintptr
 )
 
-func addTrayIcon(hwnd uintptr) {
+// addTrayIcon 添加托盘图标。
+//
+// 开机自启时程序常常比任务栏（Explorer）先就绪，此时 Shell_NotifyIcon 会失败；
+// 原来的实现忽略返回值并把状态当成"已添加"，结果整个进程生命周期里都没有托盘图标
+// —— 悬浮窗一切正常，但托盘里找不到程序、也打不开菜单。这里改成失败即重试。
+func addTrayIcon(hwnd uintptr) bool {
 	trayHwnd = hwnd
 
 	var nid notifyIconData
@@ -162,13 +175,74 @@ func addTrayIcon(hwnd uintptr) {
 	nid.UCallbackMessage = wmAppTray
 
 	icon, _, _ := pLoadIconW.Call(0, 32512) // IDI_APPLICATION
+	if icon == 0 {
+		log.Printf("加载托盘图标资源失败，图标可能显示为空白")
+	}
 	nid.HIcon = icon
 
 	tip, _ := syscall.UTF16FromString("三角洲行动 · 每日密码")
 	copy(nid.SzTip[:], tip)
 
-	pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
+	r, _, callErr := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
+	if r == 0 {
+		if trayRetries == 0 && !trayIconAdded {
+			// 把完整性级别一起记下来：Access is denied 基本都是 UIPI 拦截
+			log.Printf("添加托盘图标失败（%v）；%s", callErr, integrityContext())
+			// 托盘不可用时悬浮窗就是唯一的交互入口：立刻显示出来，
+			// 否则用户双击后既没有托盘图标、悬浮窗又被跟随逻辑藏起来，看起来像没启动
+			setTrayBroken(true)
+			pPostMessageW.Call(hwnd, wmAppShowMe, 0, 0)
+		}
+		trayIconAdded = false
+		if trayRetries < trayMaxRetries {
+			trayRetries++
+			pSetTimer.Call(hwnd, trayRetryTimerID, trayRetryInterval, 0)
+		} else {
+			log.Printf("托盘图标连续 %d 次添加失败，请确认任务栏（explorer.exe）正在运行；%s",
+				trayMaxRetries, integrityContext())
+		}
+		return false
+	}
+
+	setTrayBroken(false)
+
+	// 记下这次之前的状态，用于只在"从无到有"时打日志
+	wasAdded := trayIconAdded
 	trayIconAdded = true
+	if trayRetries > 0 {
+		log.Printf("托盘图标已添加（重试 %d 次后恢复）", trayRetries)
+		trayRetries = 0
+	} else if !wasAdded {
+		log.Printf("托盘图标已添加")
+	}
+	pKillTimer.Call(hwnd, trayRetryTimerID)
+	// 以管理员身份运行时 Explorer 是中等完整性，它发来的托盘回调会被 UIPI 拦掉，
+	// 表现为图标能显示但点了没反应，这里显式放行
+	allowTrayMessages(hwnd)
+	return true
+}
+
+// setTrayBroken 更新"托盘图标不可用"标记，并在界面上体现出来
+func setTrayBroken(broken bool) {
+	if trayBroken == broken {
+		return
+	}
+	trayBroken = broken
+	if mainHwnd != 0 {
+		renderOverlay()
+	}
+}
+
+// allowTrayMessages 放行需要从 Explorer 送进来的消息（UIPI）
+func allowTrayMessages(hwnd uintptr) {
+	const msgfltAllow = 1
+	if err := pChangeWindowMessageFilterEx.Find(); err != nil {
+		return // 老系统没有这个 API，忽略
+	}
+	pChangeWindowMessageFilterEx.Call(hwnd, wmAppTray, msgfltAllow, 0)
+	if taskbarCreatedMsg != 0 {
+		pChangeWindowMessageFilterEx.Call(hwnd, uintptr(taskbarCreatedMsg), msgfltAllow, 0)
+	}
 }
 
 func removeTrayIcon() {

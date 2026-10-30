@@ -6,15 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -61,7 +59,7 @@ func login(qrPath, preferredUin string, forceQRCode bool) (*Credentials, error) 
 		if err == nil {
 			return cred, nil
 		}
-		fmt.Printf("电脑版 QQ 快捷登录不可用（%v），改用手机扫码登录\n", err)
+		log.Printf("电脑版 QQ 快捷登录不可用（%v），改用手机扫码登录", err)
 	}
 	return qrLogin(qrPath)
 }
@@ -79,8 +77,8 @@ func qrLogin(qrPath string) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("二维码已保存到：%s\n", qrPath)
-	fmt.Println("请使用手机 QQ 扫描二维码，并在手机上确认登录")
+	log.Printf("二维码已保存到：%s", qrPath)
+	log.Printf("请使用手机 QQ 扫描二维码，并在手机上确认登录")
 	openQRCode(qrPath)
 
 	checkURL, err := waitForScan(client, qrsig)
@@ -127,7 +125,7 @@ func quickLogin(preferredUin string) (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("检测到电脑版 QQ 已登录账号：%s（%s），正在快捷登录\n", account.Nickname, account.Uin.String())
+	log.Printf("检测到电脑版 QQ 已登录账号：%s（%s），正在快捷登录", account.Nickname, account.Uin.String())
 
 	keyIndex, err := fetchClientKey(localClient, token, account)
 	if err != nil {
@@ -422,7 +420,7 @@ func waitForScan(client *http.Client, qrsig string) (string, error) {
 		switch parts[1] {
 		case "0":
 			if len(parts) > 9 {
-				fmt.Printf("扫码结果：%s\n", parts[9])
+				log.Printf("扫码结果：%s", parts[9])
 			}
 			return parts[5], nil
 		case "1":
@@ -433,7 +431,7 @@ func waitForScan(client *http.Client, qrsig string) (string, error) {
 			// 二维码尚未被扫描，继续等待
 		case "67":
 			if !confirmed {
-				fmt.Println("已扫描二维码，请在手机上确认登录")
+				log.Printf("已扫描二维码，请在手机上确认登录")
 				confirmed = true
 			}
 		default:
@@ -553,18 +551,6 @@ func exchangeCode(client *http.Client, code string) (*Credentials, error) {
 		AccessToken: string(token[1]),
 		SavedAt:     time.Now(),
 	}, nil
-}
-
-// openQRCode 在 Windows 上自动打开二维码图片，方便扫码
-func openQRCode(qrPath string) {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	absPath, err := filepath.Abs(qrPath)
-	if err != nil {
-		return
-	}
-	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", absPath).Start()
 }
 
 func loadCredentials(path string) (*Credentials, error) {

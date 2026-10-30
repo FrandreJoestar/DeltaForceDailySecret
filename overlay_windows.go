@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -16,30 +17,47 @@ import (
 const (
 	overlayTimerID = 1
 
+	// 悬浮窗窗口类名；单实例唤醒时用它 FindWindow 定位已有窗口
+	overlayClassName = "DeltaDailySecretOverlay"
+
 	wsPopup        = 0x80000000
 	wsExTopmost    = 0x00000008
 	wsExToolWindow = 0x00000080
 	wsExLayered    = 0x00080000
 	wsExNoActivate = 0x08000000
 
-	wmDestroy    = 0x0002
-	wmPaint      = 0x000F
-	wmClose      = 0x0010
-	wmEraseBkgnd = 0x0014
-	wmTimer      = 0x0113
-	wmNcHitTest  = 0x0084
-	wmLButtonUp  = 0x0202
-	wmRButtonUp  = 0x0205
-	wmAppUpdate  = 0x8001
+	wmDestroy      = 0x0002
+	wmPaint        = 0x000F
+	wmClose        = 0x0010
+	wmEraseBkgnd   = 0x0014
+	wmTimer        = 0x0113
+	wmNcHitTest    = 0x0084
+	wmNcRButtonUp  = 0x00A5
+	wmLButtonUp    = 0x0202
+	wmRButtonUp    = 0x0205
+	wmExitSizeMove = 0x0232
+	wmAppUpdate    = 0x8001
 
 	htCaption  = 2
 	swShow     = 5
 	smCXScreen = 0
 
+	smXVirtualScreen  = 76
+	smYVirtualScreen  = 77
+	smCXVirtualScreen = 78
+	smCYVirtualScreen = 79
+
 	fwBold = 700
 
+	swpNoMove     = 0x0002
 	swpNoZOrder   = 0x0004
 	swpNoActivate = 0x0010
+
+	// overlayCornerRadius 是圆角半径（DIP），与原 SetWindowRgn 的 14px 椭圆一致
+	overlayCornerRadius = 7
+
+	// 手动唤起后保持可见的宽限期，避免刚显示就被跟随逻辑立刻隐藏
+	overlayStickyGrace = 15 * time.Second
 
 	// UpdateLayeredWindow
 	ulwAlpha      = 0x00000002
@@ -90,7 +108,6 @@ var (
 	pSetWindowPos        = user32.NewProc("SetWindowPos")
 	pSendMessageW        = user32.NewProc("SendMessageW")
 	pLoadCursorW         = user32.NewProc("LoadCursorW")
-	pSetWindowRgn        = user32.NewProc("SetWindowRgn")
 	pSetProcessDPIAware  = user32.NewProc("SetProcessDPIAware")
 	pGetDpiForSystem     = user32.NewProc("GetDpiForSystem")
 	pUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
@@ -103,7 +120,6 @@ var (
 	pDeleteObject       = gdi32.NewProc("DeleteObject")
 	pDeleteDC           = gdi32.NewProc("DeleteDC")
 	pCreateFontW        = gdi32.NewProc("CreateFontW")
-	pCreateRoundRectRgn = gdi32.NewProc("CreateRoundRectRgn")
 	pCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
 
 	pGdiplusStartup               = gdiplus.NewProc("GdiplusStartup")
@@ -273,6 +289,12 @@ var (
 	state    = overlayState{loading: true}
 	fetchFn  func() ([]Secret, error)
 	fetching atomic.Bool
+
+	// stickyUntil 之前不接受跟随逻辑的自动隐藏（仅界面线程读写）
+	stickyUntil time.Time
+
+	// limitedPrivilege 表示进程以 Low 完整性级别运行（写不了配置、加不了托盘）
+	limitedPrivilege bool
 )
 
 // runOverlay 创建右上角悬浮窗、托盘和设置窗口，并进入消息循环
@@ -285,11 +307,21 @@ func runOverlay(fetch func() ([]Secret, error)) error {
 	fetchFn = fetch
 	initDPIAwareness()
 	loadAppSettings()
+	// 记录权限环境：托盘图标加不上时，这一行就是判断依据
+	log.Printf("启动：管理员=%v；%s", isElevated(), integrityContext())
+
+	// 低完整性级别下写不了用户目录、也发不了托盘消息，这不是 ACL 问题，
+	// 而是强制完整性策略（Low 写不了 Medium 标记的目录），必须在界面上说明
+	if rid, ok := currentIntegrityRID(); ok && rid < 0x2000 {
+		limitedPrivilege = true
+		log.Printf("警告：进程以受限（Low）完整性级别运行，配置无法保存、托盘图标无法创建；" +
+			"请从资源管理器直接启动，或用 -elevate=true 提权")
+	}
 	initTaskbarMessage()
 	registerSettingsClass()
 
 	hInst, _, _ := pGetModuleHandleW.Call(0)
-	className, _ := syscall.UTF16PtrFromString("DeltaDailySecretOverlay")
+	className, _ := syscall.UTF16PtrFromString(overlayClassName)
 	cursor, _, _ := pLoadCursorW.Call(0, 32512) // IDC_ARROW
 
 	wc := wndClassEx{
@@ -305,8 +337,7 @@ func runOverlay(fetch func() ([]Secret, error)) error {
 
 	winWidth = px(246)
 	winHeight = overlayHeight(1)
-	screenW, _, _ := pGetSystemMetrics.Call(smCXScreen)
-	x := int32(screenW) - winWidth - px(20)
+	x, y := initialOverlayPos(winWidth, winHeight)
 
 	title, _ := syscall.UTF16PtrFromString("三角洲行动每日密码")
 	hwnd, _, err := pCreateWindowExW.Call(
@@ -314,7 +345,7 @@ func runOverlay(fetch func() ([]Secret, error)) error {
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
 		uintptr(wsPopup),
-		uintptr(x), uintptr(px(20)),
+		uintptr(x), uintptr(y),
 		uintptr(winWidth), uintptr(winHeight),
 		0, 0, hInst, 0,
 	)
@@ -326,7 +357,6 @@ func runOverlay(fetch func() ([]Secret, error)) error {
 	cfg := currentSettings()
 	overlayOpacity = clampOpacity(cfg.Opacity)
 
-	applyWindowRegion(hwnd, winWidth, winHeight)
 	initFonts()
 	initOverlayGraphics()
 	renderOverlay()
@@ -392,6 +422,11 @@ func overlayWndProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 		// 整块区域都当作标题栏，由系统处理拖动，避免自定义拖拽与点击冲突
 		return htCaption
 	case wmTimer:
+		// 托盘图标添加失败后的重试定时器，与每日刷新共用 WM_TIMER
+		if wparam == trayRetryTimerID {
+			addTrayIcon(hwnd)
+			return 0
+		}
 		triggerFetch()
 		return 0
 	case wmHotkey:
@@ -405,12 +440,32 @@ func overlayWndProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 			showTrayMenu(hwnd)
 		}
 		return 0
+	case wmNcRButtonUp:
+		// 整窗都按标题栏处理，右键落在这里。
+		// 托盘图标加不上时（UIPI/任务栏异常），这是打开菜单的唯一入口
+		showTrayMenu(hwnd)
+		return 0
 	case wmAppFollow:
+		// 手动唤起后的宽限期内不响应自动隐藏，否则用户刚看到窗口它就消失了；
+		// 托盘图标不可用时也不隐藏——那样用户就彻底没有入口了
+		if wparam == 0 && (trayBroken || time.Now().Before(stickyUntil)) {
+			return 0
+		}
 		if wparam != 0 {
 			pShowWindow.Call(hwnd, swShowNormal)
 		} else {
 			pShowWindow.Call(hwnd, swHide)
 		}
+		return 0
+	case wmAppShowMe:
+		// 第二次启动：把悬浮窗显示出来，并给它一段不被自动隐藏的宽限期
+		stickyUntil = time.Now().Add(overlayStickyGrace)
+		pShowWindow.Call(hwnd, swShowNormal)
+		renderOverlay()
+		return 0
+	case wmExitSizeMove:
+		// 拖动（整窗都是标题栏）或调整大小结束后记录位置
+		saveOverlayPos(hwnd)
 		return 0
 	case wmCommand:
 		switch wparam & 0xFFFF {
@@ -438,6 +493,7 @@ func overlayWndProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 	case wmDestroy:
 		removeTrayIcon()
 		pKillTimer.Call(hwnd, overlayTimerID)
+		pKillTimer.Call(hwnd, trayRetryTimerID)
 		releaseOverlaySurface()
 		releaseOverlayGraphics()
 		releaseFonts()
@@ -447,6 +503,7 @@ func overlayWndProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintpt
 
 	// 资源管理器重启后重新添加托盘图标
 	if taskbarCreatedMsg != 0 && message == taskbarCreatedMsg {
+		trayRetries = 0 // 任务栏重启，重试次数重新计数
 		addTrayIcon(hwnd)
 		return 0
 	}
@@ -526,10 +583,8 @@ func layoutOverlay(hwnd uintptr) {
 	h := overlayHeight(rows)
 	if h != winHeight {
 		winHeight = h
-		screenW, _, _ := pGetSystemMetrics.Call(smCXScreen)
-		x := int32(screenW) - winWidth - px(20)
-		pSetWindowPos.Call(hwnd, 0, uintptr(x), uintptr(px(20)), uintptr(winWidth), uintptr(h), swpNoZOrder|swpNoActivate)
-		applyWindowRegion(hwnd, winWidth, h)
+		// 只改高度，保留用户拖动后的位置
+		pSetWindowPos.Call(hwnd, 0, 0, 0, uintptr(winWidth), uintptr(h), swpNoMove|swpNoZOrder|swpNoActivate)
 	}
 	renderOverlay()
 }
@@ -541,10 +596,60 @@ func overlayHeight(rows int) int32 {
 	return px(12) + px(24) + px(24) + int32(rows)*px(27) + px(32)
 }
 
-func applyWindowRegion(hwnd uintptr, w, h int32) {
-	rgn, _, _ := pCreateRoundRectRgn.Call(0, 0, uintptr(w+1), uintptr(h+1), uintptr(px(14)), uintptr(px(14)))
-	if rgn != 0 {
-		pSetWindowRgn.Call(hwnd, rgn, 1)
+// initialOverlayPos 计算悬浮窗初始位置：优先用上次保存的位置，否则贴在右上角
+func initialOverlayPos(w, h int32) (int32, int32) {
+	cfg := currentSettings()
+	if cfg.PosSet {
+		return clampOverlayPos(int32(cfg.PosX), int32(cfg.PosY), w, h)
+	}
+	screenW, _, _ := pGetSystemMetrics.Call(smCXScreen)
+	return clampOverlayPos(int32(screenW)-w-px(20), px(20), w, h)
+}
+
+// clampOverlayPos 把位置限制在虚拟桌面内，保证窗口至少留出 80 像素可见，
+// 避免显示器被拔掉或分辨率变化后窗口跑到屏幕外。
+func clampOverlayPos(x, y, w, h int32) (int32, int32) {
+	metric := func(index uintptr) int32 {
+		v, _, _ := pGetSystemMetrics.Call(index)
+		return int32(v)
+	}
+	vx, vy := metric(smXVirtualScreen), metric(smYVirtualScreen)
+	vw, vh := metric(smCXVirtualScreen), metric(smCYVirtualScreen)
+	margin := px(80)
+
+	minX, maxX := vx-w+margin, vx+vw-margin
+	if minX > maxX {
+		minX, maxX = maxX, minX
+	}
+	minY, maxY := vy-h+margin, vy+vh-margin
+	if minY > maxY {
+		minY, maxY = maxY, minY
+	}
+	return clampInt32(x, minX, maxX), clampInt32(y, minY, maxY)
+}
+
+func clampInt32(v, lo, hi int32) int32 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// saveOverlayPos 在拖动结束后把窗口位置写回 settings.json
+func saveOverlayPos(hwnd uintptr) {
+	var wr rect
+	pGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&wr)))
+
+	cfg := currentSettings()
+	if cfg.PosSet && cfg.PosX == int(wr.Left) && cfg.PosY == int(wr.Top) {
+		return
+	}
+	cfg.PosX, cfg.PosY, cfg.PosSet = int(wr.Left), int(wr.Top), true
+	if err := saveAppSettings(cfg); err != nil {
+		log.Printf("保存悬浮窗位置失败: %v", err)
 	}
 }
 
@@ -640,7 +745,7 @@ func renderOverlay() {
 		return
 	}
 
-	fillCardBackground(overlayBits, overlayOpacity)
+	fillCardBackground(overlayBits, w, h, overlayOpacity)
 
 	stateMu.Lock()
 	loading := state.loading
@@ -698,7 +803,15 @@ func drawOverlayTexts(gfx uintptr, w, h int32, loading bool, secrets []Secret, e
 		gpDraw(gfx, "获取失败，稍后自动重试", pad, y, contentW, rowH, gpFontBody, gpBrushError, gpFmtLeft)
 	}
 
-	gpDraw(gfx, "托盘图标设置 · 按住拖动", pad, h-px(24), contentW, px(14), gpFontSmall, gpBrushFooter, gpFmtRight)
+	switch {
+	case limitedPrivilege:
+		// 根因优先：受限权限下托盘一定加不上，别让用户误以为是托盘的问题
+		gpDraw(gfx, "权限受限", pad, h-px(24), contentW, px(14), gpFontSmall, gpBrushError, gpFmtLeft)
+	case trayBroken:
+		// 托盘图标彻底加不上时，界面上要明确告诉用户"右键可用"
+		gpDraw(gfx, "托盘不可用", pad, h-px(24), contentW, px(14), gpFontSmall, gpBrushError, gpFmtLeft)
+	}
+	gpDraw(gfx, "右键菜单 · 按住拖动", pad, h-px(24), contentW, px(14), gpFontSmall, gpBrushFooter, gpFmtRight)
 }
 
 func gpDraw(gfx uintptr, text string, x, y, w, h int32, font, brush, format uintptr) {
@@ -789,8 +902,11 @@ func releaseOverlayGraphics() {
 	gpReady = false
 }
 
-// fillCardBackground 用带 alpha 的卡片颜色填充背景（预乘 alpha）
-func fillCardBackground(bits []byte, opacity int) {
+// fillCardBackground 用带 alpha 的卡片颜色填充背景（预乘 alpha）。
+// 圆角由逐像素覆盖率实现，边缘带 1 像素过渡，不再依赖 SetWindowRgn 的硬裁剪。
+func fillCardBackground(bits []byte, w, h int32, opacity int) {
+	mask := roundCoverage(w, h)
+
 	a := uint32(opacity*255/100) & 0xFF
 	if a < 1 {
 		a = 1
@@ -799,17 +915,63 @@ func fillCardBackground(bits []byte, opacity int) {
 	g := uint32((clrCard >> 8) & 0xFF)
 	b := uint32((clrCard >> 16) & 0xFF)
 
-	pb := byte(b * a / 255)
-	pg := byte(g * a / 255)
-	pr := byte(r * a / 255)
-	pa := byte(a)
-
-	for i := 0; i < len(bits); i += 4 {
-		bits[i] = pb
-		bits[i+1] = pg
-		bits[i+2] = pr
-		bits[i+3] = pa
+	for i := 0; i+3 < len(bits); i += 4 {
+		pa := a
+		if p := i / 4; p < len(mask) {
+			pa = uint32(mask[p]) * a / 255
+		}
+		if pa == 0 {
+			bits[i], bits[i+1], bits[i+2], bits[i+3] = 0, 0, 0, 0
+			continue
+		}
+		bits[i] = byte(b * pa / 255)
+		bits[i+1] = byte(g * pa / 255)
+		bits[i+2] = byte(r * pa / 255)
+		bits[i+3] = byte(pa)
 	}
+}
+
+var (
+	roundMask  []byte
+	roundMaskW int32
+	roundMaskH int32
+	roundMaskR float64
+)
+
+// roundCoverage 返回 w×h 的圆角矩形覆盖率（0-255，不含不透明度），按尺寸缓存。
+// 覆盖率用圆角矩形的有符号距离场算：距离为负在内部，边缘 0.5 处过渡，
+// 因此角落是抗锯齿的，而不是 SetWindowRgn 那种单色像素台阶。
+func roundCoverage(w, h int32) []byte {
+	radius := float64(px(overlayCornerRadius))
+	if roundMask != nil && roundMaskW == w && roundMaskH == h && roundMaskR == radius {
+		return roundMask
+	}
+
+	mask := make([]byte, int(w)*int(h))
+	hw, hh := float64(w)/2, float64(h)/2
+	for y := int32(0); y < h; y++ {
+		qy := math.Abs(float64(y)+0.5-hh) - (hh - radius)
+		row := int(y) * int(w)
+		for x := int32(0); x < w; x++ {
+			qx := math.Abs(float64(x)+0.5-hw) - (hw - radius)
+
+			// 圆角矩形的标准 SDF：外部取圆角距离，内部取轴向距离
+			d := math.Hypot(math.Max(qx, 0), math.Max(qy, 0)) +
+				math.Min(math.Max(qx, qy), 0) - radius
+
+			switch cov := 0.5 - d; {
+			case cov <= 0:
+				mask[row+int(x)] = 0
+			case cov >= 1:
+				mask[row+int(x)] = 255
+			default:
+				mask[row+int(x)] = byte(cov*255 + 0.5)
+			}
+		}
+	}
+
+	roundMask, roundMaskW, roundMaskH, roundMaskR = mask, w, h, radius
+	return mask
 }
 
 // compositeText 把文字层（预乘 alpha）合成到背景上，文字保持完全不透明

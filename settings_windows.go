@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,6 +46,10 @@ type appSettings struct {
 	FollowExe  string `json:"follow_exe"`
 	Opacity    int    `json:"opacity"`
 	AutoFollow bool   `json:"auto_follow"`
+	// 悬浮窗位置（屏幕坐标）；PosSet 为 false 时使用默认的右上角
+	PosX   int  `json:"overlay_x"`
+	PosY   int  `json:"overlay_y"`
+	PosSet bool `json:"overlay_pos_set"`
 }
 
 var (
@@ -87,11 +90,9 @@ func settingsFilePath() string {
 	if appSettingsPath != "" {
 		return appSettingsPath
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "settings.json"
-	}
-	return filepath.Join(filepath.Dir(exe), "settings.json")
+	// %LOCALAPPDATA% 优先；程序目录下的旧版配置仍然兼容
+	appSettingsPath = resolveDataFile("settings.json")
+	return appSettingsPath
 }
 
 func loadAppSettings() {
@@ -106,6 +107,9 @@ func loadAppSettings() {
 		FollowExe  string `json:"follow_exe"`
 		Opacity    int    `json:"opacity"`
 		AutoFollow *bool  `json:"auto_follow"`
+		PosX       int    `json:"overlay_x"`
+		PosY       int    `json:"overlay_y"`
+		PosSet     bool   `json:"overlay_pos_set"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return
@@ -120,6 +124,9 @@ func loadAppSettings() {
 		FollowExe:  raw.FollowExe,
 		Opacity:    raw.Opacity,
 		AutoFollow: true, // 旧版配置没有该字段时默认开启自动识别
+		PosX:       raw.PosX,
+		PosY:       raw.PosY,
+		PosSet:     raw.PosSet,
 	}
 	if raw.AutoFollow != nil {
 		s.AutoFollow = *raw.AutoFollow
@@ -147,7 +154,20 @@ func saveAppSettings(s appSettings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(settingsFilePath(), data, 0600)
+	return writeFileAtomic(settingsFilePath(), data, 0600)
+}
+
+// writeFileAtomic 先写临时文件再改名，避免写到一半崩溃/断电留下半截配置
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // clampOpacity 把不透明度限制在允许范围内
@@ -229,16 +249,14 @@ func setAutostart(enable bool) error {
 	return nil
 }
 
-// isProcessRunning 通过进程快照判断指定进程名是否在运行
-func isProcessRunning(name string) bool {
-	name = normalizeProcessName(name)
-	if name == "" {
-		return false
-	}
+// processNameSet 一次快照取回所有进程名，键为小写文件名、值为原始文件名。
+// 跟随检查原本是"每个候选进程各建一次快照"，改成一次快照后成本从 N 降到 1。
+func processNameSet() map[string]string {
+	names := make(map[string]string, 256)
 
 	snap, _, _ := pCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
 	if snap == 0 || snap == ^uintptr(0) {
-		return false
+		return names
 	}
 	defer pCloseHandle.Call(snap)
 
@@ -246,12 +264,23 @@ func isProcessRunning(name string) bool {
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	r, _, _ := pProcess32FirstW.Call(snap, uintptr(unsafe.Pointer(&entry)))
 	for r != 0 {
-		if strings.EqualFold(syscall.UTF16ToString(entry.ExeFile[:]), name) {
-			return true
+		if name := syscall.UTF16ToString(entry.ExeFile[:]); name != "" {
+			names[strings.ToLower(name)] = name
 		}
 		r, _, _ = pProcess32NextW.Call(snap, uintptr(unsafe.Pointer(&entry)))
 	}
-	return false
+	return names
+}
+
+// isProcessRunning 通过进程快照判断指定进程名是否在运行。
+// 枚举进程名只需要 TH32CS_SNAPPROCESS，标准用户即可，不需要管理员权限。
+func isProcessRunning(name string) bool {
+	name = normalizeProcessName(name)
+	if name == "" {
+		return false
+	}
+	_, ok := processNameSet()[strings.ToLower(name)]
+	return ok
 }
 
 // startFollowWatcher 每 3 秒检查一次目标进程，状态变化时通知界面线程

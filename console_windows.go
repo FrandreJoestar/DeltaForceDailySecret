@@ -4,7 +4,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 )
 
@@ -37,8 +36,13 @@ func stdHandleValid(f *os.File) bool {
 	return err == nil
 }
 
-// ensureConsole 保证有可用的控制台（控制台模式使用）
+// ensureConsole 保证有可用的控制台（控制台模式使用）。
+// 标准输出已经重定向到文件或管道时不要新建控制台：新建之后 bindConsole
+// 会把 os.Stdout 换成 CONOUT$，用户重定向到文件的输出就跑到新窗口里去了。
 func ensureConsole() {
+	if stdHandleValid(os.Stdout) {
+		return
+	}
 	if w, _, _ := pGetConsoleWindow.Call(); w != 0 {
 		return
 	}
@@ -59,16 +63,20 @@ func openConsole() {
 	consoleCreated = true
 	bindConsole()
 	pSetConsoleTitleW.Call(utf16Ptr("三角洲行动 · 每日密码"))
+	// 新建的控制台里没有历史输出，先把内存中保留的最近日志回放出来
+	replayLogs()
 	fmt.Println("控制台已打开，可查看运行日志。")
 	logFollowDiagnostics()
 }
 
-// bindConsole 把标准输入输出重新绑定到当前控制台
+// bindConsole 把标准输入输出重新绑定到当前控制台。
+// 日志由 logSink 负责落盘，这里只是把它额外镜像到控制台，
+// 因此不能再用 log.SetOutput 覆盖，否则文件日志会中断。
 func bindConsole() {
 	if out, err := os.OpenFile("CONOUT$", os.O_RDWR, 0); err == nil {
 		os.Stdout = out
 		os.Stderr = out
-		log.SetOutput(out)
+		logSinkInst.setConsole(out)
 	}
 	if in, err := os.OpenFile("CONIN$", os.O_RDWR, 0); err == nil {
 		os.Stdin = in
